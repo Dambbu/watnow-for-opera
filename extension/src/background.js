@@ -44,7 +44,9 @@ async function setup() {
   await migrateSchool();
   await syncBridge().catch((e) => console.warn("bridge", e));
   try {
-    await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+    if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
+      await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+    }
   } catch (e) {
     console.warn("sidePanel behavior", e);
   }
@@ -99,6 +101,89 @@ async function syncBridge() {
 
 chrome.permissions.onAdded.addListener(() => syncBridge());
 chrome.permissions.onRemoved.addListener(() => syncBridge());
+
+/**
+ * Opens WATnow. Uses the native Chrome Side Panel when available.
+ * In Opera GX and other browsers without side panel support, opens a
+ * dedicated companion window docked alongside the browser.
+ */
+async function openPanel(tab) {
+  if (chrome.sidePanel && chrome.sidePanel.open) {
+    try {
+      await chrome.sidePanel.open({ windowId: tab?.windowId });
+      return;
+    } catch (e) {
+      console.warn("sidePanel.open", e);
+    }
+  }
+
+  let panelWinId = null;
+  try {
+    const session = await chrome.storage.session.get("panelWindowId");
+    panelWinId = session.panelWindowId || null;
+  } catch {
+    /* session storage unavailable */
+  }
+
+  if (panelWinId !== null) {
+    try {
+      const existing = await chrome.windows.get(panelWinId);
+      if (existing) {
+        await chrome.windows.update(panelWinId, { focused: true });
+        return;
+      }
+    } catch {
+      panelWinId = null;
+    }
+  }
+
+  const width = 420;
+  let left;
+  let top;
+  let height = 750;
+
+  if (tab?.windowId) {
+    try {
+      const currentWin = await chrome.windows.get(tab.windowId);
+      if (currentWin && typeof currentWin.width === "number") {
+        left = Math.max(0, (currentWin.left || 0) + currentWin.width - width);
+        top = currentWin.top;
+        height = currentWin.height || height;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const win = await chrome.windows.create({
+    url: chrome.runtime.getURL("panel/panel.html"),
+    type: "popup",
+    width,
+    height,
+    left,
+    top,
+    focused: true,
+  });
+
+  try {
+    await chrome.storage.session.set({ panelWindowId: win.id });
+  } catch {
+    /* ignore */
+  }
+}
+
+chrome.action.onClicked.addListener(openPanel);
+
+chrome.windows.onRemoved.addListener(async (winId) => {
+  try {
+    const { panelWindowId } = await chrome.storage.session.get("panelWindowId");
+    if (winId === panelWindowId) {
+      await chrome.storage.session.remove("panelWindowId");
+    }
+  } catch {
+    /* ignore */
+  }
+});
 
 chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === "install") pingInstall();
